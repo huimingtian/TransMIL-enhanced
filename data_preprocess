@@ -1,0 +1,406 @@
+import os
+os.environ.setdefault('OPENCV_IO_MAX_IMAGE_PIXELS', '20000000000000000')
+from PIL import Image
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+Image.MAX_IMAGE_PIXELS = None
+import pandas as pd
+import numpy as np
+# from skimage import io
+import pickle
+# import cv2 as cv
+# from tensorflow.keras.models import load_model
+from sklearn.neighbors import NearestNeighbors
+import torch.nn as nn
+
+import os
+import pickle
+import numpy as np
+# import cv2 as cv
+# import openslide
+
+
+def crop_slides_ndpi(args):   #  读取.ndpi格式的图片
+    folders = os.listdir(args.wsi_dir)
+    print('Start cropping the slides......\n')
+    print('folders', folders)
+    for idx in range(len(folders)):
+        print('Image number: ', idx)
+        print('Total Image number: ', len(folders))
+        image_dir = args.wsi_dir + folders[idx]
+
+        if (os.path.exists(args.patch_dir + '//' + folders[idx][:-4])):
+            continue
+        else:
+            ALL_PATCHES = []
+            PATCHES = []
+
+            input_img = openslide.OpenSlide(image_dir)
+            print('input_img', input_img.dimensions)
+            size = args.patch_size  # 512
+            for x in range(0, input_img.dimensions[0], size):  # 判断像素点是不是背景区域
+                for y in range(0, input_img.dimensions[1], size):
+                    patch = np.array(input_img.read_region((x, y), 0, (size, size)))[:, :, :3]
+                    loc = (x, y)
+                    if patch.shape == (size, size, 3):
+                        ALL_PATCHES.append([patch, loc])
+                        gray = cv.cvtColor(patch, cv.COLOR_BGR2GRAY)
+                        gray[gray > 200] = 1
+                        if np.count_nonzero(gray - 1) / (size * size) > 0.75:
+                            PATCHES.append([patch, loc])
+            PATCHES_dir = args.patch_dir + '//' + folders[idx][:-4]
+            os.makedirs(PATCHES_dir)
+            with open(PATCHES_dir + '//patches.pkl', 'wb') as f:
+                pickle.dump(PATCHES, f)
+
+            print('Cropping is Done!!!!\n')
+
+
+def crop_slides(args):
+    folders = os.listdir(args.wsi_dir)
+    print('Start cropping the slides......\n')
+    # print('folders', folders)
+    for idx in range(len(folders)):
+        print('Image number: ', idx)
+        print('Total Image number: ', len(folders))
+        image_dir = args.wsi_dir + folders[idx]
+
+        if (os.path.exists(args.patch_dir+'//' + folders[idx][:-4])):
+            print('已存在:', folders[idx][:-4])
+            continue
+        else:
+            ALL_PATCHES = []
+            PATCHES = []
+
+            input_img = io.imread(image_dir)
+            print('input_img', input_img.shape)
+            # input_img = Image.open(image_dir)
+            size = args.patch_size  # 512
+            c = 0
+            for x in range(0, input_img.shape[0], size):  # 判断像素点是不是背景区域
+                for y in range(0, input_img.shape[1], size):
+                    c += 1
+                    patch = input_img[x:min(x + size, input_img.shape[0]), y:min(y + size, input_img.shape[1])]
+                    loc = (x, y)
+                    if patch.shape == (size, size, 3):
+                        ALL_PATCHES.append([patch, loc])
+                        gray = cv.cvtColor(patch, cv.COLOR_BGR2GRAY)
+                        gray[gray > 225] = 1
+                        if np.count_nonzero(gray - 1) / (size * size) > 0.75:
+                            PATCHES.append([patch, loc])
+            print('WSI切分patchs数量：', c)
+            PATCHES_dir = args.patch_dir + '//' + folders[idx][:-4]
+            os.makedirs(PATCHES_dir)
+            with open(PATCHES_dir + '//patches.pkl', 'wb') as f:
+                pickle.dump(PATCHES, f)
+
+            print('Cropping is Done!!!!\n')
+
+    
+def create_labels(args):
+    folders = os.listdir(args.feature_dir)
+    clinical = pd.read_csv(args.labels, encoding='gbk')
+    label_list = []
+    print('Start creating labels......\n')
+    for idx in range(959):
+        #print('Image number: ',idx)
+        score1 = int(clinical['primary_gleason_grade'][idx])
+        score2 = int(clinical['secondary_gleason_grade'][idx])
+        
+        summ = score1 + score2
+        
+        if summ==0:
+            label = 0
+        elif summ<=6:
+            label = 1                
+        elif summ == 7 and score1 ==3:
+            label = 1
+        elif summ == 7 and score1 ==4:
+            label = 1
+        elif summ == 8:
+            label = 1
+        elif summ >= 9:
+            label = 1
+        
+        
+        label_list.append([score1, score2, label])
+        label_list = np.array(label_list)
+        
+        label_dir = args.label_dir+'//' + clinical['image_id'][idx]
+        os.makedirs(label_dir)
+        with open(label_dir + '//label.pkl', 'wb') as f:
+            pickle.dump(label_list, f) 
+        label_list = []
+    print('Labels are created!!!!\n')
+
+
+def feature_extraction1(args):
+    print('Loading the Encoder....\n')
+    encoder = load_model(args.auto_model)    # .h5文件
+    print('Encoder is loaded!\n')
+    patch_names = os.listdir(args.patch_dir)   # patchs
+    print('Start extracting features...\n')
+    for i in range(len(patch_names)):
+        print('Image number: ', i)
+        model_output = []
+        Feature_dir = args.feature_dir +'//' + patch_names[i]
+        
+        patch_dir = args.patch_dir + '//' + patch_names[i]
+        patches = pickle.load(open(patch_dir + '//patches.pkl', "rb"))
+
+        
+        for jj in range(len(patches)):
+            patch = patches[jj][0]   # (512, 512, 3)
+            print('patch', patch.shape)
+
+            # z = encoder.predict(patch.reshape((1, patch.shape[1], patch.shape[1], 3))).reshape((256, 256, 3))
+            z = encoder.predict(patch.reshape((1, patch.shape[1], patch.shape[1], 3)))
+
+            model_output.append(z)
+
+            
+        model_output = np.array(model_output)
+        
+        os.makedirs(Feature_dir)
+        with open(Feature_dir + '//vectors.pkl', 'wb') as f:
+            pickle.dump(model_output, f)
+
+    print('Feature extraction is finished.\n')
+
+
+import torch
+import torchvision.models as models
+# from efficientnet_pytorch import EfficientNet
+import torchvision.transforms as transforms
+# from resnet.resnet_custom import resnet50_baseline
+
+# 两个维度
+def feature_extraction(args):
+    print('Loading the Encoder....\n')
+    # model = EfficientNet.from_pretrained('efficientnet-b0')
+    model = resnet50_baseline(pretrained=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()  # Set the encoder to evaluation mode
+    print('Encoder is loaded!\n')
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),  # 转换为张量
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 标准化
+    ])
+
+    patch_names = os.listdir(args.patch_dir)  # patchs
+    print('Start extracting features...\n')
+
+    for i in range(len(patch_names)):   # 一张WSI
+        # print('len(patch_names)', len(patch_names))
+        if (os.path.exists(args.feature_dir+'//' + patch_names[i])):
+            print('已存在:', patch_names[i])
+            continue
+        else:
+            print('patch_names: ', patch_names[i])
+            print('Image number: ', i)
+            model_output = []
+            Feature_dir = args.feature_dir + '//' + patch_names[i]
+            patch_dir = args.patch_dir + '//' + patch_names[i]
+            patches = pickle.load(open(patch_dir + '//patches.pkl', "rb"))
+            c = 0
+            for jj in range(len(patches)):
+                c += 1
+                patch = patches[jj][0]  # (512, 512, 3)
+                # print('patches[jj][0]', patches[jj][0])
+                image = transform(patch).unsqueeze(0)  # # (1, 3, 512, 512)
+                # print('image', image.shape)
+                image = image.to(device)
+                with torch.no_grad():
+                    # feature = model.extract_features(image).squeeze()  # torch.Size([1280, 16, 16])
+                    # print('feature1', feature.shape)
+                    # feature = nn.AdaptiveAvgPool2d((1, 1))(feature)  # torch.Size([1280, 1, 1])
+                    # print('feature2', feature.shape)
+                    # feature = feature.view(1, -1).cpu().numpy()  # (1, 1280)
+                    # print('feature3', feature.shape)
+                    feature = model(image)
+                    feature = feature.cpu().numpy()
+                    model_output.append(feature)
+            # print('model_output', model_output)
+            print("c", c)
+            os.makedirs(Feature_dir)
+            with open(Feature_dir + '//vectors.pkl', 'wb') as f:
+                pickle.dump(model_output, f)
+
+    print('Feature extraction is finished.\n')
+
+
+# 四个维度
+def feature_extraction2(args):
+    print('Loading the Encoder....\n')
+    model = EfficientNet.from_pretrained('efficientnet-b0')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()  # Set the encoder to evaluation mode
+    print('Encoder is loaded!\n')
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),  # 转换为张量
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 标准化
+    ])
+
+    patch_names = os.listdir(args.patch_dir)  # patchs
+    print('Start extracting features...\n')
+
+    for i in range(len(patch_names)):   # 一张WSI
+        print('patch_names: ', patch_names[i])
+        print('Image number: ', i)
+        model_output = []
+        Feature_dir = args.feature_dir + '//' + patch_names[i]
+        patch_dir = args.patch_dir + '//' + patch_names[i]
+        patches = pickle.load(open(patch_dir + '//patches.pkl', "rb"))
+        c = 0
+        for jj in range(len(patches)):
+            c += 1
+            patch = patches[jj][0]  # (512, 512, 3)
+            image = transform(patch).unsqueeze(dim=0)  # # (1, 3, 512, 512)
+            print('image', image.shape)
+            image = image.to(device)
+            with torch.no_grad():
+                feature = model.extract_features(image)   # ([1, 1280, 16, 16])
+                print('feature1', feature.shape)
+                # feature = nn.AdaptiveAvgPool2d((1, 1))(feature)
+                # print('feature1', feature.shape)
+                # feature = feature.view(1, -1)
+                # feature = feature.view(1, 1280, 16, 16)
+                # feature = nn.functional.interpolate(feature, size=(224, 224), mode='bilinear', align_corners=False)
+                feature = feature.cpu().numpy()
+                # print('feature1', feature.shape)
+                model_output.append(feature)
+
+        print("c", c)
+        os.makedirs(Feature_dir)
+        with open(Feature_dir + '//vectors.pkl', 'wb') as f:
+            pickle.dump(model_output, f)
+
+    print('Feature extraction is finished.\n')
+
+import h5py
+class Graph_Conversion():
+    def __init__(self, folders,patch_dir,feature_vector_dir, score_dir,top_feature_dir, top_patch_dir):
+        self.patch_dir = patch_dir
+        self.top_patch_dir = top_patch_dir
+        self.top_feature_dir = top_feature_dir
+        self.score_dir = score_dir
+        self.feature_vector_dir = feature_vector_dir
+        self.folders = folders
+    def load_files(self, ind):
+        scores = pickle.load(open(self.score_dir + self.folders[ind], "rb"))
+        feature_vector = torch.load(open(self.feature_vector_dir + self.folders[ind], "rb"))
+        # patches = h5py.File(open(self.patch_dir + self.folders[ind] + '.h5', "rb"))
+        return feature_vector, scores
+    
+    def getBestScore(self, scores, top_ratio):
+        print('scores', scores)
+        flat = scores.flatten()
+        print('flat', flat)
+        indices = np.argpartition(flat, -int(len(scores)*top_ratio))[-int(len(scores)*top_ratio):]
+        print('indices1', indices)
+        indices = indices[np.argsort(-flat[indices])]
+        print('indices2', indices)
+        print('indices3', np.unravel_index(indices, scores.shape)[0])
+        return np.unravel_index(indices, scores.shape)[0]
+        # flat = scores.flatten()
+        # indices = flat.argsort()[-int(len(scores)*top_ratio):][::-1]
+        # return indices
+
+    def extractTopKFeatures(self, ind, top_ratio):
+        feature_vector, scores = self.load_files(ind)
+        best_scores_indices = self.getBestScore(scores, top_ratio)
+        # top_patches = [patches[str(i)] for i in best_scores_indices]
+        # top_features = [torch.Tensor(feature_vector[i]) for i in best_scores_indices]
+        top_features = []
+        for i in best_scores_indices:
+            top_feature = feature_vector[i]
+            top_feature = torch.Tensor(top_feature)
+            top_features.append(top_feature)
+        top_features = torch.stack(top_features, dim=0)
+        return top_features
+
+    def Save_Graph(self, top_features, ind):
+        # with open(self.top_patch_dir + self.folders[ind], 'wb') as f:
+        #     pickle.dump(top_patches, f)
+        with open(self.top_feature_dir + self.folders[ind], 'wb') as f:
+            torch.save(top_features, f)
+
+
+    def Build_All_Graphes(self, top_ratio):
+        c = 1
+        for ind in range(len(self.folders)):
+            top_features = self.extractTopKFeatures(ind, top_ratio)
+            self.Save_Graph(top_features, ind)
+            print('正在处理:{}/{}'.format(c, len(self.folders)))
+            c = c+1
+
+def build_graphs(args):        
+    patch_dir = args.patch_dir + '//'
+    top_patch_dir = args.top_patche_dir + '//'
+    ###image_dir = 'data//'
+    top_feature_dir = args.top_feature_dir+'//'
+    score_dir = args.scores_dir
+    feature_vector_dir = args.feature_dir +'//'
+    folders = os.listdir(score_dir)
+    print('Start creating the graphs....\n')
+    g = Graph_Conversion(folders, patch_dir, feature_vector_dir, score_dir,top_feature_dir, top_patch_dir)
+    g.Build_All_Graphes(args.top/100)
+    print('The graphs are saved!\n')
+    
+
+
+def histo_equalization(img_array):
+    ######################################
+    # PERFORM HISTOGRAM EQUALIZATION
+    ######################################
+    
+    """
+    STEP 1: Normalized cumulative histogram
+    """
+    #flatten image array and calculate histogram via binning
+    histogram_array = np.bincount(img_array.flatten(), minlength=256)
+    
+    #normalize
+    num_pixels = np.sum(histogram_array)
+    histogram_array = histogram_array/num_pixels
+    
+    #normalized cumulative histogram
+    chistogram_array = np.cumsum(histogram_array)
+    
+    
+    """
+    STEP 2: Pixel mapping lookup table
+    """
+    transform_map = np.floor(255 * chistogram_array).astype(np.uint8)
+    
+    
+    """
+    STEP 3: Transformation
+    """
+    # flatten image array into 1D list
+    img_list = list(img_array.flatten())
+    
+    # transform pixel values to equalize
+    eq_img_list = [transform_map[p] for p in img_list]
+    
+    # reshape and write back into img_array
+    eq_img_array = np.reshape(np.asarray(eq_img_list), img_array.shape)
+    return eq_img_array
+
+
+def histo_equalization2(patch):
+    img_yuv = cv.cvtColor(patch, cv.COLOR_BGR2YUV)
+    # equalize the histogram of the Y channel
+    img_yuv[:, :, 0] = cv.equalizeHist(img_yuv[:, :, 0])
+    # convert the YUV image back to RGB format
+    img_output = cv.cvtColor(img_yuv, cv.COLOR_YUV2BGR)
+    return img_output
+
+
+
+
+
