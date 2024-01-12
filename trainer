@@ -1,0 +1,440 @@
+
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
+# from model import *
+# from data_preprocess import *
+import random
+import pickle
+import pandas as pd
+from torch.utils.data.sampler import Sampler
+import torch.nn as nn
+from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.parameter import Parameter
+from torch.autograd import Variable
+# from sklearn import metrics
+# from sklearn.model_selection import KFold, train_test_split
+from scipy.stats import pearsonr
+import torch
+import torchvision.models as models
+import torchmetrics
+import csv
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+
+def Load_data_model(args):
+    feature_dir = args.feature_dir + '//'
+    label_dir = args.label_dir + '//'
+
+    file = r'F:\10769\分级\去掉差的切片\train_80%_bingli_无内分泌.csv'  # 训练集csv文件
+    folders = pd.read_csv(file, encoding='gbk')['image_id']
+
+    features = []
+    labels = []
+    sequence_names = []
+    for i in range(len(folders)):
+        features.append(torch.load(open(feature_dir + str(folders[i]) + '.pt', "rb")))
+        labels.append(pickle.load(open(label_dir + folders[i].split('.pt')[0] + '//label.pkl', "rb"))[0][-1])
+        sequence_names.append(folders[i])
+    WG = dict(zip(sequence_names, features))
+    zipped = list(zip(sequence_names, labels))
+    ds = pd.DataFrame(zipped, columns=['names', 'stability'])
+    return ds
+
+def Load_data_model_test(args):
+    feature_dir = args.feature_dir + '//'
+    label_dir = args.label_dir + '//'
+
+    file = r'F:\10769\分级\去掉差的切片\test_20%_bingli_subei_zhongshan(苏北无内分泌去掉错误多的病例).csv'   #  测试集csv文件
+    folders = pd.read_csv(file, encoding='gbk')['image_id']
+
+    features = []
+    labels = []
+    sequence_names = []
+    for i in range(len(folders)):
+        features.append(torch.load(open(feature_dir + str(folders[i]) + '.pt', "rb")))
+        labels.append(pickle.load(open(label_dir + folders[i].split('.pt')[0] + '//label.pkl', "rb"))[0][-1])
+        sequence_names.append(folders[i])
+    WG = dict(zip(sequence_names, features))
+    zipped = list(zip(sequence_names, labels))
+    ds = pd.DataFrame(zipped, columns=['names', 'stability'])
+    return ds
+
+def NodeM(filename):
+    # Get the path to the feature folder within the Preprocessed_data folder
+    data_path = os.path.join("Preprocessed_data", "top_features_20x_1%")
+
+    # Get the path to the specified pkl file
+    file_path = os.path.join(data_path, filename + '.pt')
+    data = torch.load(open(file_path, "rb"))
+
+    return data
+
+
+class Dataset(Dataset):
+
+    def __init__(self, dataframe, fold_idx, mode='train'):
+        self.names = dataframe['names'].values.tolist()
+        self.labels = dataframe['stability'].values.tolist()
+        # self.names = dataframe['names'][:int(0.8*len(dataframe))].values.tolist()
+        # self.labels = dataframe['stability'][:int(0.8*len(dataframe))].values.tolist()
+
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=None)    # 5折划分要改
+        self.indices = []
+        for idx, (train_val_idx, test_idx) in enumerate(skf.split(np.zeros(len(self.labels)), self.labels)):
+            if idx == fold_idx:
+                if mode == 'train':
+                    self.indices = train_val_idx
+                elif mode == 'val':
+                    self.indices = test_idx
+                elif mode == 'test':
+                    self.indices = test_idx
+
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        idx = self.indices[index]
+        sequence_name = self.names[idx]
+        label = self.labels[idx]
+
+        sequence_feature = NodeM(sequence_name)
+
+        sample = {'sequence_feature': sequence_feature, \
+                  'label': label, \
+                  'sequence_name': sequence_name, \
+                  }
+        return sample
+
+class Dataset_test(Dataset):
+
+    def __init__(self, dataframe):
+        self.names = dataframe['names'].values.tolist()
+        self.labels = dataframe['stability'].values.tolist()
+        # self.names = dataframe['names'][int(0.9*len(dataframe)):].values.tolist()
+        # self.labels = dataframe['stability'][int(0.9*len(dataframe)):].values.tolist()
+
+
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, index):
+        sequence_name = self.names[index]
+        label = self.labels[index]
+
+        # print("此处停一下")
+        sequence_feature = NodeM(sequence_name)
+        # print('sequence_feature', sequence_feature.shape)
+
+        sample = {'sequence_feature': sequence_feature, \
+                  'label': label, \
+                  'sequence_name': sequence_name, \
+                  }
+        return sample
+
+
+def collate_fn(batch):
+    sequence_feature = []
+    sequence_names = []
+    labels = []
+    for i in range(len(batch)):
+        sequence_feature.append(batch[i]['sequence_feature'])
+        # print('batch[i]', type(batch[i]['sequence_feature']))
+
+        # sequence_feature = np.asarray(sequence_feature)
+        # sequence_feature = [x.item() if isinstance(x, torch.Tensor) and x.numel() == 1 else x for x in sequence_feature]
+        # sequence_feature = torch.tensor(sequence_feature, dtype=torch.float32)
+        sequence_feature = [torch.tensor(x, dtype=torch.float32) for x in sequence_feature]
+        sequence_feature = torch.squeeze(torch.stack(sequence_feature))
+
+        sequence_names.append(batch[i]['sequence_name'])
+
+        labels.append(batch[i]['label'])
+        labels = np.asarray(labels)
+    # sequence_feature = torch.from_numpy(sequence_feature).float()
+    # sequence_feature = sequence_feature.float()
+
+    labels = torch.from_numpy(labels)
+
+    return sequence_feature, labels, sequence_names
+
+
+def collate_MIL(batch):
+    img = torch.cat([item[0] for item in batch], dim=0)
+    label = torch.LongTensor([item[1] for item in batch])
+    return [img, label]
+
+SEED = 2333
+
+device = torch.device("cuda")
+def train_one_epoch(model, data_loader, epoch):
+
+    epoch_loss_train = 0.0
+    n_batches = 0
+    model = model.to(device)
+    for data in tqdm(data_loader):
+        torch.cuda.empty_cache()  # 释放显存
+        # data = data.to(device)
+        model.optimizer.zero_grad()
+        sequence_feature = data[0]
+        labels = data[1]
+        sequence_names = data[2]
+        # print('sequence_names', sequence_names, sequence_feature.shape)
+        # sequence_feature, labels, sequence_names = data
+        sequence_feature = torch.squeeze(sequence_feature)
+
+        if torch.cuda.is_available():
+            features = Variable(sequence_feature.cuda())
+            y_true = Variable(labels.cuda())
+        else:
+            features = Variable(sequence_feature)
+            y_true = Variable(labels)
+
+        logits, y_pred, Y_hat, A, results_dict, M = model(features)
+        y_true = y_true
+        y_pred = y_pred.mean(dim=0)
+        # print('y_true', y_true.shape)   # y_pred torch.Size([6])  y_true torch.Size([1])
+        # print('logits', logits.shape, y_true.shape)   # logits torch.Size([1, 6])
+        Y_hat = torch.argmax(y_pred)
+        # calculate loss
+        loss = model.criterion(logits, y_true.to(dtype=torch.long, non_blocking=False))
+        # backward gradient
+        loss.backward()
+
+        # update all parameters
+        model.optimizer.step()
+
+        epoch_loss_train += loss.item()
+        n_batches += 1
+
+    epoch_loss_train_avg = epoch_loss_train / n_batches
+
+    return epoch_loss_train_avg
+
+
+def evaluate(model, data_loader):
+    model.eval()
+
+    epoch_loss = 0.0
+    n_batches = 0
+    valid_pred = []
+    valid_true = []
+    valid_name = []
+    valid_score = []
+    valid_m = []
+    y_p = []
+    one_hot_labels = []
+    model = model.to(device)
+    for data in tqdm(data_loader):
+        # data = data.to(device)
+        with torch.no_grad():
+            sequence_feature, labels, sequence_names = data
+
+            sequence_feature = torch.squeeze(sequence_feature)
+
+            if torch.cuda.is_available():
+                features = Variable(sequence_feature.cuda())
+                y_true = Variable(labels.cuda())
+            else:
+                features = Variable(sequence_feature)
+                y_true = Variable(labels)
+
+            logits, Y_prob, Y_hat, A, results_dict, M = model(features)
+            y_true = y_true
+            one_hot_label = one_hot_encode(y_true, 6)
+            one_hot_labels.append(one_hot_label)
+            y_p.append(logits)
+            Y_prob = Y_prob.mean(dim=0)
+            Y_hat = torch.argmax(Y_prob)
+
+            loss = model.criterion(logits, y_true.to(dtype=torch.long, non_blocking=False))
+
+            y_pred = Y_hat.cpu().detach().numpy().tolist()
+            y_true = y_true.cpu().detach().numpy().tolist()
+            valid_pred.append(y_pred)
+            valid_true.append(y_true)
+            valid_name.extend(sequence_names)
+            valid_score.append(A)
+            valid_m.append(M)
+
+            epoch_loss += loss.item()
+            n_batches += 1
+    print('epoch_loss', epoch_loss, 'n_batches', n_batches)
+    epoch_loss_avg = epoch_loss / n_batches
+    print('Average loss value for validation data: ', epoch_loss_avg)
+    # 计算AUC专用数据类型
+    y_p = torch.cat(y_p).cpu().numpy()
+    one_hot_labels = np.array(one_hot_labels)
+    return epoch_loss_avg, valid_true, valid_pred, valid_name, valid_score, valid_m, y_p, one_hot_labels
+
+
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, cohen_kappa_score
+def analysis(y_true, y_pred, y_p, one_hot_labels):
+
+    binary_true = np.array(y_true)
+    binary_pred = np.array(y_pred).reshape(-1, 1)
+
+    binary_acc = accuracy_score(binary_true, binary_pred)
+    binary_precision = precision_score(binary_true, binary_pred, average='macro')
+    binary_recall = recall_score(binary_true, binary_pred, average='macro')
+    binary_f1_score = f1_score(binary_true, binary_pred, average='macro')
+    binary_kappa = cohen_kappa_score(binary_true, binary_pred)
+    # binary_auc_score = roc_auc_score(binary_true, binary_pred)
+    auc_value, _, thresholds_optimal = multi_label_roc(one_hot_labels, y_p, 6, pos_label=1)
+    result = {
+        'binary_acc': binary_acc,
+        'binary_precision': binary_precision,
+        'binary_recall': binary_recall,
+        'binary_f1_score': binary_f1_score,
+        # 'binary_auc_score': binary_auc_score
+        'binary_kappa': binary_kappa
+    }
+    return result, binary_pred, binary_true, auc_value
+
+def optimal_thresh(fpr, tpr, thresholds, p=0):
+    loss = (fpr - tpr) - p * tpr / (fpr + tpr + 1)
+    idx = np.argmin(loss, axis=0)
+    return fpr[idx], tpr[idx], thresholds[idx]
+
+# 计算AUC
+def multi_label_roc(labels, predictions, num_classes, pos_label=1):
+    fprs = []
+    tprs = []
+    thresholds = []
+    thresholds_optimal = []
+    aucs = []
+    if len(predictions.shape)==1:
+        predictions = predictions[:, None]
+    for c in range(0, num_classes):
+        label = labels[:, c]
+        prediction = predictions[:, c]
+        fpr, tpr, threshold = roc_curve(label, prediction, pos_label=1)
+        fpr_optimal, tpr_optimal, threshold_optimal = optimal_thresh(fpr, tpr, threshold)
+        c_auc = roc_auc_score(label, prediction)
+        aucs.append(c_auc)
+        thresholds.append(threshold)
+        thresholds_optimal.append(threshold_optimal)
+    return aucs, thresholds, thresholds_optimal
+
+
+def one_hot_encode(label, num_classes):
+    one_hot = np.zeros(num_classes)
+    one_hot[label] = 1
+    return one_hot
+
+def train(model, dk, dn, fold=0, epochs=1000, Model_Path='model1//', Result_Path='result1//'):
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
+    train_loader = DataLoader(dataset=Dataset(dk, fold_idx=4, mode='train'), batch_size=1, shuffle=True, num_workers=0, collate_fn=collate_fn)
+    valid_loader = DataLoader(dataset=Dataset(dn, fold_idx=4, mode='val'), batch_size=1, shuffle=True, num_workers=0, collate_fn=collate_fn)
+
+    train_losses = []
+    train_binary_acc = []
+
+    valid_losses = []
+    valid_binary_acc = []
+
+    best_val_loss = 1000
+    best_epoch = 0
+
+    with open(Result_Path + '/' + 'Fold' + str(fold) + "_train_valid_losses.csv", 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['epoch', 'train_loss', 'valid_loss', 'val_acc', 'val_pre', 'val_recall', 'val_f1', 'val_kappa'])
+
+    for epoch in range(epochs):
+        print("\n========== Train epoch " + str(epoch + 1) + " ==========")
+        model.train()
+
+        epoch_loss_train_avg = train_one_epoch(model, train_loader, epoch + 1)
+        print(epoch_loss_train_avg)  # 训练损失
+        train_losses.append(epoch_loss_train_avg)
+
+        print("========== Evaluate Valid set ==========")   # 验证
+        epoch_loss_valid_avg, valid_true, valid_pred, valid_name, valid_score, valid_m, y_p, one_hot_labels = evaluate(model, valid_loader)
+        valid_losses.append(epoch_loss_valid_avg)
+        result_valid, binp, bint, auc_value = analysis(valid_true, valid_pred, y_p, one_hot_labels)
+        print("Valid binary acc: ", result_valid['binary_acc'],
+              # '\nValid binary auc:', result_valid['binary_auc_score'],
+              '\nValid binary precision:', result_valid['binary_precision'],
+              '\nValid binary recall:', result_valid['binary_recall'],
+              '\nValid binary f1:', result_valid['binary_f1_score'],
+              '\nValid binary kappa:', result_valid['binary_kappa'],
+              )
+        print('avg_auc:', sum(auc_value) / len(auc_value))
+        print('auc_value', auc_value)
+        with open(Result_Path + '/' + 'Fold' + str(fold) + "_train_valid_losses.csv", 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([epoch + 1, epoch_loss_train_avg, epoch_loss_valid_avg, result_valid['binary_acc'],
+                             result_valid['binary_precision'], result_valid['binary_recall'],
+                             result_valid['binary_f1_score'], result_valid['binary_kappa']])
+
+        valid_binary_acc.append(result_valid['binary_acc'])
+        if best_val_loss > epoch_loss_valid_avg:
+            best_val_loss = epoch_loss_valid_avg
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), os.path.join(Model_Path, 'Fold' + str(fold) + '_best_score_model.pkl'))
+            valid_detail_dataframe = pd.DataFrame(
+                {'names': valid_name, 'stability': valid_true, 'prediction': valid_pred})
+            valid_detail_dataframe.sort_values(by=['names'], inplace=True)
+            valid_detail_dataframe.to_csv(Result_Path + '/' + 'Fold' + str(fold) + "_valid_detail.csv", header=True, sep=',')
+        # torch.cuda.empty_cache()
+
+
+from zzmodels.TransMIL_attention import TransMIL_attention
+def Learn_discriminative_patches(args):
+    print("split_seed: ", SEED)
+    all_dataframe = Load_data_model(args)
+
+    fold = 0
+ 
+    model = TransMIL_attention(n_classes=6)
+    if torch.cuda.is_available():
+        model.cuda()
+    train(model, all_dataframe, all_dataframe, fold + 1, epochs=100, Model_Path=args.model1_dir,
+          Result_Path=args.result1_dir)
+
+
+def test_model1(args):
+    test_dataframe = Load_data_model_test(args)
+    test_loader = DataLoader(dataset=Dataset_test(test_dataframe), batch_size=1, shuffle=True,
+                             num_workers=0, collate_fn=collate_fn)
+    test_result = {}
+    loss = 10000
+    name = ''
+    print("============== Test set ===============")  # 验证
+    for model_name in sorted(os.listdir(args.model1_dir)):
+        
+        model_s = TransMIL_attention(n_classes=6)
+        if torch.cuda.is_available():
+            model_s.cuda()
+        print(args.model1_dir, " + ", model_name)
+        model_s.load_state_dict(torch.load(args.model1_dir + "//" + model_name), strict=True)
+        model_s.eval()
+
+        epoch_loss_valid_avg, valid_true, valid_pred, valid_name, valid_score, valid_m, y_p, one_hot_labels = evaluate(model_s, test_loader)
+        result_valid, binp, bint, auc_value = analysis(valid_true, valid_pred, y_p, one_hot_labels)
+        print("Valid binary acc: ", result_valid['binary_acc'],
+              # '\nValid binary auc:', result_valid['binary_auc_score'],
+              '\nValid binary precision:', result_valid['binary_precision'],
+              '\nValid binary recall:', result_valid['binary_recall'],
+              '\nValid binary f1:', result_valid['binary_f1_score'],
+              '\nValid binary kappa:', result_valid['binary_kappa'],
+              )
+        print('avg_auc:', sum(auc_value) / len(auc_value))
+        print('auc_value', auc_value)
+
+        if epoch_loss_valid_avg < loss:
+            loss = epoch_loss_valid_avg
+            name = model_name
+            valid_detail_dataframe = pd.DataFrame(
+                {'names': valid_name, 'stability': valid_true, 'prediction': valid_pred})
+            valid_detail_dataframe.sort_values(by=['names'], inplace=True)
+            valid_detail_dataframe.to_csv(args.result1_dir + '/' + 'Fold' + "_test_detail.csv", header=True,
+                                          sep=',')
+
+
+
