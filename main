@@ -1,0 +1,33 @@
+from config import * 
+from trainer_91 import *   # 改标签文件
+from data_preprocess import *
+
+
+cfg = Config()
+
+if cfg.mode == 'crop':
+    create_labels(cfg)
+    # crop_slides(cfg)
+
+if cfg.mode =='auto':
+    train_auto(cfg)
+
+if cfg.mode == 'feature':
+    feature_extraction(cfg)
+    
+if cfg.mode == 'graph':
+    build_graphs(cfg)
+    
+if cfg.mode == 'model1':
+    if cfg.state1 == 'traintest':
+        Learn_discriminative_patches(cfg)
+        test_model1(cfg)
+        # scores(cfg)
+    elif cfg.state1 == 'test':
+        test_model1(cfg)
+    elif cfg.state1 == 'scores':
+        scores(cfg)
+        
+if cfg.mode =='model2':
+    Train_model2(cfg)
+
