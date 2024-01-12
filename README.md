@@ -1,1 +1,1 @@
-# TransMIL
+# TransMIL-enhanced
